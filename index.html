@@ -1,0 +1,406 @@
+
+<!doctype html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101827">
+  <title>Edy Remote</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 20px;
+      font: 16px/1.5 system-ui, sans-serif;
+      background: #101827; color: #edf3ff;
+    }
+    main { max-width: 760px; margin: auto; }
+    header, section {
+      background: #1b2638; border: 1px solid #344258;
+      border-radius: 16px; padding: 20px; margin-bottom: 16px;
+    }
+    h1 { margin: 0; font-size: 28px; }
+    h2 { margin-top: 0; font-size: 20px; }
+    p { color: #bac7da; }
+    input, button {
+      width: 100%; padding: 12px; margin: 6px 0;
+      border-radius: 9px; font: inherit;
+    }
+    input {
+      color: #fff; background: #101827;
+      border: 1px solid #46556d;
+    }
+    button {
+      border: 0; background: #3978f6;
+      color: white; font-weight: 700; cursor: pointer;
+    }
+    button.secondary { background: #344258; }
+    button.danger { background: #9d343f; }
+    button:disabled { opacity: .6; cursor: wait; }
+    .muted { font-size: 13px; color: #bac7da; }
+    .device {
+      border: 1px solid #344258; border-radius: 12px;
+      padding: 14px; margin: 10px 0;
+      overflow-wrap: anywhere;
+    }
+    .device strong { display: block; font-size: 17px; }
+    #message { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .hidden { display: none !important; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .row button { flex: 1; min-width: 130px; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>📱 Edy Remote</h1>
+    <p>Central de gestão dos teus dispositivos Android.</p>
+    <p class="muted">Versão inicial ligada ao Supabase.</p>
+  </header>
+
+  <section id="authSection">
+    <h2 id="authTitle">Iniciar sessão</h2>
+    <form id="authForm">
+      <input id="email" type="email" placeholder="O teu email"
+        autocomplete="email" required>
+      <input id="password" type="password"
+        placeholder="Palavra-passe (mínimo 6 caracteres)"
+        autocomplete="current-password" minlength="6" required>
+      <button id="authSubmit" type="submit">Entrar</button>
+    </form>
+    <button id="toggleAuth" class="secondary" type="button">
+      Ainda não tenho conta — criar conta
+    </button>
+    <p class="muted">
+      Usa a conta que criaste no Supabase ou cria uma conta nova.
+    </p>
+  </section>
+
+  <section id="appSection" class="hidden">
+    <div class="row">
+      <div style="flex:2;min-width:180px">
+        <h2>Os meus dispositivos</h2>
+        <p id="signedIn" class="muted"></p>
+      </div>
+      <div style="flex:1;min-width:110px">
+        <button id="logout" class="secondary" type="button">
+          Terminar sessão
+        </button>
+      </div>
+    </div>
+
+    <h2>Registar aparelho</h2>
+    <form id="deviceForm">
+      <input id="deviceName" maxlength="80"
+        placeholder="Nome, ex.: Telefone da oficina" required>
+      <input id="deviceModel" maxlength="100"
+        placeholder="Modelo, ex.: Samsung Galaxy A14">
+      <input id="deviceCity" maxlength="100"
+        placeholder="Cidade ou local">
+      <button id="saveDevice" type="submit">Guardar dispositivo</button>
+    </form>
+
+    <div class="row">
+      <button id="refresh" class="secondary" type="button">
+        Atualizar lista
+      </button>
+    </div>
+
+    <div id="deviceList"></div>
+  </section>
+
+  <section>
+    <h2>Estado do sistema</h2>
+    <p id="message" role="status">A preparar a ligação…</p>
+  </section>
+
+  <p class="muted">
+    Esta versão guarda registos reais na base de dados.
+    Ainda não controla o ecrã, localização, chamadas ou SMS dos aparelhos.
+  </p>
+</main>
+
+<script type="module">
+import { createClient } from
+  'https://esm.sh/@supabase/supabase-js@2';
+
+// 1. O endereço do teu projeto Supabase:
+const SUPABASE_URL =
+  'https://rfbsfkyttpnwvkdtzwah.supabase.co';
+
+// 2. Substitui pelo valor COMPLETO da tua chave pública:
+const SUPABASE_KEY = 'COLOCA_A_TUA_CHAVE_PUBLICA_AQUI';
+
+const authSection = document.getElementById('authSection');
+const appSection = document.getElementById('appSection');
+const message = document.getElementById('message');
+const authForm = document.getElementById('authForm');
+const authTitle = document.getElementById('authTitle');
+const authSubmit = document.getElementById('authSubmit');
+const toggleAuth = document.getElementById('toggleAuth');
+const deviceList = document.getElementById('deviceList');
+
+let supabase;
+let currentUser = null;
+let creatingAccount = false;
+let busy = false;
+
+function status(text) {
+  message.textContent = text;
+}
+
+function escapeHTML(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  })[char]);
+}
+
+function setBusy(value) {
+  busy = value;
+  authSubmit.disabled = value;
+  document.getElementById('saveDevice').disabled = value;
+}
+
+function showAuth() {
+  authSection.classList.remove('hidden');
+  appSection.classList.add('hidden');
+}
+
+function showApp() {
+  authSection.classList.add('hidden');
+  appSection.classList.remove('hidden');
+  document.getElementById('signedIn').textContent =
+    'Sessão iniciada: ' + currentUser.email;
+}
+
+function errorText(error) {
+  return error?.message || 'Ocorreu um erro desconhecido.';
+}
+
+function updateAuthMode() {
+  authTitle.textContent = creatingAccount
+    ? 'Criar conta'
+    : 'Iniciar sessão';
+
+  authSubmit.textContent = creatingAccount
+    ? 'Criar conta'
+    : 'Entrar';
+
+  toggleAuth.textContent = creatingAccount
+    ? 'Já tenho conta — iniciar sessão'
+    : 'Ainda não tenho conta — criar conta';
+
+  document.getElementById('password').autocomplete =
+    creatingAccount ? 'new-password' : 'current-password';
+}
+
+toggleAuth.addEventListener('click', () => {
+  creatingAccount = !creatingAccount;
+  updateAuthMode();
+});
+
+authForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (busy) return;
+
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+
+  setBusy(true);
+  try {
+    if (creatingAccount) {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password
+      });
+
+      if (error) throw error;
+
+      if (data.session) {
+        currentUser = data.user;
+        showApp();
+        await loadDevices();
+      } else {
+        status(
+          'Conta enviada. Se o Supabase exigir confirmação, ' +
+          'abre o teu email e confirma a conta. Depois inicia sessão.'
+        );
+      }
+    } else {
+      const { data, error } =
+        await supabase.auth.signInWithPassword({ email, password });
+
+      if (error) throw error;
+
+      currentUser = data.user;
+      showApp();
+      await loadDevices();
+    }
+  } catch (error) {
+    status('Não foi possível autenticar: ' + errorText(error));
+  } finally {
+    setBusy(false);
+  }
+});
+
+async function loadDevices() {
+  if (!currentUser) return;
+
+  deviceList.replaceChildren();
+  status('A consultar a base de dados…');
+
+  const { data, error } = await supabase
+    .from('devices')
+    .select('id, device_name, model, city, created_at')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    status('Erro ao carregar dispositivos: ' + errorText(error));
+    return;
+  }
+
+  if (!data.length) {
+    deviceList.textContent = 'Ainda não registaste nenhum dispositivo.';
+  } else {
+    for (const device of data) {
+      const card = document.createElement('article');
+      card.className = 'device';
+
+      card.innerHTML = `
+        <strong>${escapeHTML(device.device_name)}</strong>
+        <p>Modelo: ${escapeHTML(device.model || 'Não indicado')}</p>
+        <p>Local: ${escapeHTML(device.city || 'Não indicado')}</p>
+        <p class="muted">Registado: ${
+          escapeHTML(new Date(device.created_at).toLocaleString())
+        }</p>
+        <button class="danger" type="button">Apagar registo</button>
+      `;
+
+      card.querySelector('button').addEventListener('click', async () => {
+        if (!confirm('Queres apagar este registo da base de dados?')) {
+          return;
+        }
+
+        const { error: deleteError } = await supabase
+          .from('devices')
+          .delete()
+          .eq('id', device.id)
+          .eq('user_id', currentUser.id);
+
+        if (deleteError) {
+          status('Erro ao apagar: ' + errorText(deleteError));
+          return;
+        }
+
+        status('Registo apagado.');
+        await loadDevices();
+      });
+
+      deviceList.appendChild(card);
+    }
+  }
+
+  status('Lista atualizada. Registos encontrados: ' + data.length);
+}
+
+document.getElementById('deviceForm').addEventListener(
+  'submit', async event => {
+    event.preventDefault();
+    if (!currentUser || busy) return;
+
+    const device_name =
+      document.getElementById('deviceName').value.trim();
+    const model =
+      document.getElementById('deviceModel').value.trim();
+    const city =
+      document.getElementById('deviceCity').value.trim();
+
+    if (!device_name) {
+      status('Indica o nome do dispositivo.');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const { error } = await supabase.from('devices').insert({
+        user_id: currentUser.id,
+        device_name,
+        model: model || null,
+        city: city || null
+      });
+
+      if (error) throw error;
+
+      event.target.reset();
+      status('Dispositivo guardado na base de dados.');
+      await loadDevices();
+    } catch (error) {
+      status('Não foi possível guardar: ' + errorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+);
+
+document.getElementById('refresh').addEventListener(
+  'click', loadDevices
+);
+
+document.getElementById('logout').addEventListener('click', async () => {
+  const { error } = await supabase.auth.signOut();
+
+  if (error) {
+    status('Erro ao terminar sessão: ' + errorText(error));
+    return;
+  }
+
+  currentUser = null;
+  deviceList.replaceChildren();
+  showAuth();
+  status('Sessão terminada.');
+});
+
+async function start() {
+  if (
+    !SUPABASE_KEY ||
+    SUPABASE_KEY === 'COLOCA_A_TUA_CHAVE_PUBLICA_AQUI'
+  ) {
+    showAuth();
+    status('Falta inserir a chave pública do teu projeto Supabase no código.');
+    return;
+  }
+
+  try {
+    supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw error;
+
+    currentUser = data.session?.user || null;
+
+    if (currentUser) {
+      showApp();
+      await loadDevices();
+    } else {
+      showAuth();
+      status('Ligação preparada. Inicia sessão para continuar.');
+    }
+
+    supabase.auth.onAuthStateChange((_event, session) => {
+      currentUser = session?.user || null;
+      if (!currentUser) showAuth();
+    });
+  } catch (error) {
+    showAuth();
+    status('Falha ao iniciar: ' + errorText(error));
+  }
+}
+
+updateAuthMode();
+start();
+</script>
+</body>
+</html>
